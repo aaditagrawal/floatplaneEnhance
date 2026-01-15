@@ -2,6 +2,8 @@
 
 A browser extension that adds video queueing functionality to Floatplane, allowing you to build and manage a watchlist with automatic playback.
 
+<img src="static/demo.png" alt="Floatplane Queue Demo" width="400">
+    
 ## Features
 
 - **Queue Management**: Add videos to your queue directly from video thumbnails with hover-to-reveal add buttons
