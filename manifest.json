@@ -1,0 +1,37 @@
+{
+    "manifest_version": 3,
+    "name": "Floatplane Queue",
+    "version": "1.0.0",
+    "description": "Add video queueing functionality to Floatplane",
+    "permissions": [
+        "storage"
+    ],
+    "host_permissions": [
+        "*://*.floatplane.com/*"
+    ],
+    "content_scripts": [
+        {
+            "matches": [
+                "*://*.floatplane.com/*"
+            ],
+            "js": [
+                "src/content.js"
+            ],
+            "css": [
+                "src/styles.css"
+            ],
+            "run_at": "document_end"
+        }
+    ],
+    "background": {
+        "service_worker": "src/background.js"
+    },
+    "action": {
+        "default_title": "Floatplane Queue"
+    },
+    "icons": {
+        "16": "src/icons/icon16.png",
+        "48": "src/icons/icon48.png",
+        "128": "src/icons/icon128.png"
+    }
+}
