@@ -1,0 +1,10 @@
+{
+  "dependencies": {},
+  "devDependencies": {
+    "jsdom": "^30.1.1"
+  },
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  }
+}
