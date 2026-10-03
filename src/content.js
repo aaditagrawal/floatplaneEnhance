@@ -3,45 +3,46 @@
 const STATE = {
     queue: [], // Array of { id, title, url, thumbnail, duration }
     currentIndex: -1, // Index of currently playing video (-1 if none)
-    isOpen: false
 };
 
+let draggingVideoId = null;
+
 // --- Storage ---
-const loadQueue = async () => {
+const loadQueue = async (autoplay = true) => {
     try {
         const result = await chrome.storage.local.get(['fp_queue', 'fp_queue_index']);
         STATE.queue = result.fp_queue || [];
         STATE.currentIndex = result.fp_queue_index ?? -1;
         updateContainerVisibility();
         renderQueue();
-        checkAutoAdd();
-        tryAutoPlayVideo(); // Try to auto-play if we just navigated
+        if (autoplay) checkAutoAdd();
+        if (autoplay) tryAutoPlayVideo(); // Only autoplay on initial navigation
     } catch (e) {
         STATE.contextValid = false;
         // Silent - extension was reloaded, user should refresh
     }
 };
 
-const saveQueue = async () => {
-    try {
-        await chrome.storage.local.set({
-            'fp_queue': STATE.queue,
-            'fp_queue_index': STATE.currentIndex
-        });
-        updateContainerVisibility();
-        renderQueue();
-    } catch (e) {
-        STATE.contextValid = false;
-        // Silent - extension was reloaded, user should refresh
-    }
+const mutateQueue = async (action, values = {}) => {
+    const result = await chrome.runtime.sendMessage({ type: 'fp_queue_action', action, ...values });
+    if (result.error) throw new Error(result.error);
+    STATE.queue = result.queue;
+    STATE.currentIndex = result.currentIndex;
+    updateContainerVisibility();
+    renderQueue();
 };
+
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && (changes.fp_queue || changes.fp_queue_index)) {
+        loadQueue(false);
+    }
+});
 
 const updateContainerVisibility = () => {
     const container = document.getElementById('fp-queue-container');
     if (container) {
         if (STATE.queue.length === 0) {
             container.style.display = 'none';
-            STATE.isOpen = false;
             container.classList.add('fp-queue-collapsed');
         } else {
             container.style.display = 'flex';
@@ -49,45 +50,14 @@ const updateContainerVisibility = () => {
     }
 };
 
-const addToQueue = (video, options = { silent: false, setAsCurrent: false }) => {
-    const existingIndex = STATE.queue.findIndex(v => v.id === video.id);
-
-    if (existingIndex !== -1) {
-        if (options.setAsCurrent) {
-            STATE.currentIndex = existingIndex;
-            saveQueue();
-            if (!options.silent) showNotification(`Now Playing: ${video.title}`);
-        } else {
-            if (!options.silent) showNotification('Already in Queue');
-        }
-    } else {
-        STATE.queue.push(video);
-        if (options.setAsCurrent) {
-            STATE.currentIndex = STATE.queue.length - 1;
-        }
-        saveQueue();
-        updateContainerVisibility();
-        if (!options.silent) showNotification(`Added to Queue: ${video.title}`);
-    }
+const addToQueue = async (video, options = { silent: false, setAsCurrent: false }) => {
+    const existing = STATE.queue.some(item => item.id === video.id);
+    await mutateQueue('add', { video, setAsCurrent: options.setAsCurrent });
+    if (!options.silent) showNotification(existing ? 'Already in Queue' : `Added to Queue: ${video.title}`);
 };
 
-const removeFromQueue = (index) => {
-    STATE.queue.splice(index, 1);
-    // Adjust currentIndex if needed
-    if (STATE.currentIndex >= index && STATE.currentIndex > 0) {
-        STATE.currentIndex--;
-    }
-    if (STATE.currentIndex >= STATE.queue.length) {
-        STATE.currentIndex = STATE.queue.length - 1;
-    }
-    saveQueue();
-};
-
-const clearQueue = () => {
-    STATE.queue = [];
-    STATE.currentIndex = -1;
-    saveQueue();
-};
+const removeFromQueue = (index) => mutateQueue('remove', { id: STATE.queue[index]?.id });
+const clearQueue = () => mutateQueue('clear');
 
 // --- UI Components ---
 
@@ -126,7 +96,6 @@ const createQueuePanel = () => {
   `;
     toggleBtn.onclick = () => {
         container.classList.toggle('fp-queue-collapsed');
-        STATE.isOpen = !container.classList.contains('fp-queue-collapsed');
     };
 
     const content = document.createElement('div');
@@ -190,11 +159,13 @@ const renderQueue = () => {
         item.draggable = true;
 
         item.ondragstart = (e) => {
-            e.dataTransfer.setData('text/plain', index);
+            draggingVideoId = video.id;
+            e.dataTransfer.setData('application/x-fp-queue-index', String(index));
             e.dataTransfer.effectAllowed = 'move';
             item.classList.add('dragging');
         };
         item.ondragend = () => {
+            draggingVideoId = null;
             item.classList.remove('dragging');
         };
         item.ondragover = (e) => {
@@ -203,20 +174,15 @@ const renderQueue = () => {
         };
         item.ondrop = (e) => {
             e.preventDefault();
-            const fromIndex = parseInt(e.dataTransfer.getData('text/plain'));
+            const payload = e.dataTransfer.getData('application/x-fp-queue-index');
+            if (!/^\d+$/.test(payload)) return;
+            const fromIndex = Number(payload);
+            if (!Number.isSafeInteger(fromIndex) || fromIndex >= STATE.queue.length) return;
+            if (draggingVideoId !== STATE.queue[fromIndex]?.id) return;
+            draggingVideoId = null;
             const toIndex = index;
             if (fromIndex !== toIndex) {
-                const movedItem = STATE.queue.splice(fromIndex, 1)[0];
-                STATE.queue.splice(toIndex, 0, movedItem);
-                // Update currentIndex if affected
-                if (STATE.currentIndex === fromIndex) {
-                    STATE.currentIndex = toIndex;
-                } else if (fromIndex < STATE.currentIndex && toIndex >= STATE.currentIndex) {
-                    STATE.currentIndex--;
-                } else if (fromIndex > STATE.currentIndex && toIndex <= STATE.currentIndex) {
-                    STATE.currentIndex++;
-                }
-                saveQueue();
+                mutateQueue('move', { id: STATE.queue[fromIndex].id, targetId: video.id });
             }
         };
 
@@ -232,23 +198,31 @@ const renderQueue = () => {
         const metaLine = metaParts.join(' • ');
 
         item.innerHTML = `
-      <div class="fp-queue-item-thumb" style="background-image: url('${video.thumbnail}')">
-        ${isCurrent ? '<div class="fp-queue-playing-indicator">▶</div>' : ''}
-      </div>
+      <div class="fp-queue-item-thumb"></div>
       <div class="fp-queue-item-info">
-        <div class="fp-queue-item-title"><span class="fp-queue-rank">${rank}.</span> ${titleText}</div>
-        <div class="fp-queue-item-meta">${metaLine}</div>
+        <div class="fp-queue-item-title"><span class="fp-queue-rank"></span></div>
+        <div class="fp-queue-item-meta"></div>
       </div>
       <div class="fp-queue-actions">
         <button class="fp-queue-remove" title="Remove">×</button>
       </div>
     `;
+        const thumb = item.querySelector('.fp-queue-item-thumb');
+        thumb.style.backgroundImage = `url(${JSON.stringify(video.thumbnail || '')})`;
+        if (isCurrent) {
+            const indicator = document.createElement('div');
+            indicator.className = 'fp-queue-playing-indicator';
+            indicator.textContent = '▶';
+            thumb.appendChild(indicator);
+        }
+        item.querySelector('.fp-queue-rank').textContent = `${rank}.`;
+        item.querySelector('.fp-queue-item-title').appendChild(document.createTextNode(` ${titleText}`));
+        item.querySelector('.fp-queue-item-meta').textContent = metaLine;
 
-        item.onclick = (e) => {
+        item.onclick = async (e) => {
             if (e.target.closest('.fp-queue-remove')) return;
             // Set as current and navigate
-            STATE.currentIndex = index;
-            saveQueue();
+            await mutateQueue('select', { id: video.id });
             window.location.href = video.url;
         };
 
@@ -268,15 +242,14 @@ const checkAutoAdd = () => {
     const path = window.location.pathname;
     if (!path.startsWith('/post/')) return;
 
-    const id = path.split('/post/')[1];
+    const id = getPostId(window.location.href);
 
     // Find if already in queue
     const existingIdx = STATE.queue.findIndex(v => v.id === id);
     if (existingIdx !== -1) {
         // Just update currentIndex to this item
         if (STATE.currentIndex !== existingIdx) {
-            STATE.currentIndex = existingIdx;
-            saveQueue();
+            mutateQueue('select', { id });
         }
         return;
     }
@@ -311,11 +284,16 @@ const checkAutoAdd = () => {
 };
 
 
+const getPostId = (url) => {
+    const pathname = new URL(url, window.location.href).pathname;
+    return pathname.startsWith('/post/') ? pathname.slice(6).replace(/\/$/, '') : '';
+};
+
 // --- Injection Logic ---
 
 const extractVideoInfo = (anchor, container) => {
     const url = anchor.href;
-    const id = url.split('/post/')[1];
+    const id = getPostId(url);
 
     let thumbnail = '';
     const img = container.querySelector('img');
@@ -394,7 +372,7 @@ const processVideoLinks = () => {
 
     links.forEach(anchor => {
         // Extract video ID
-        const videoId = anchor.href.split('/post/')[1];
+        const videoId = getPostId(anchor.href);
         if (!videoId || processedIds.has(videoId)) return;
 
         // Check if this anchor contains an image (it's a thumbnail link)
@@ -468,7 +446,7 @@ const startObserver = () => {
 };
 
 // --- Navigation ---
-const playNext = () => {
+const playNext = async () => {
     if (STATE.queue.length === 0) {
         showNotification('Queue is empty');
         return;
@@ -476,15 +454,15 @@ const playNext = () => {
 
     const nextIndex = STATE.currentIndex + 1;
     if (nextIndex < STATE.queue.length) {
-        STATE.currentIndex = nextIndex;
-        saveQueue();
-        window.location.href = STATE.queue[nextIndex].url;
+        const nextVideo = STATE.queue[nextIndex];
+        await mutateQueue('select', { id: nextVideo.id });
+        window.location.href = nextVideo.url;
     } else {
         showNotification('End of queue');
     }
 };
 
-const playPrevious = () => {
+const playPrevious = async () => {
     if (STATE.queue.length === 0) {
         showNotification('Queue is empty');
         return;
@@ -492,9 +470,9 @@ const playPrevious = () => {
 
     const prevIndex = STATE.currentIndex - 1;
     if (prevIndex >= 0) {
-        STATE.currentIndex = prevIndex;
-        saveQueue();
-        window.location.href = STATE.queue[prevIndex].url;
+        const previousVideo = STATE.queue[prevIndex];
+        await mutateQueue('select', { id: previousVideo.id });
+        window.location.href = previousVideo.url;
     } else {
         showNotification('Beginning of queue');
     }
@@ -512,15 +490,14 @@ const setupAutoplay = () => {
     video.addEventListener('ended', () => {
         if (!STATE.contextValid) return;
         console.log("Video ended.");
-        loadQueue().then(() => {
+        loadQueue(false).then(() => {
             const nextIndex = STATE.currentIndex + 1;
             if (nextIndex < STATE.queue.length) {
                 const nextVideo = STATE.queue[nextIndex];
                 console.log("Autoplaying next:", nextVideo.title);
                 showNotification(`Up Next: ${nextVideo.title}`);
-                setTimeout(() => {
-                    STATE.currentIndex = nextIndex;
-                    saveQueue();
+                setTimeout(async () => {
+                    await mutateQueue('select', { id: nextVideo.id });
                     window.location.href = nextVideo.url;
                 }, 1500);
             } else {
